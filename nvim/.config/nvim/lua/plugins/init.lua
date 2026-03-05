@@ -17,6 +17,12 @@ return {
     lazy = false,
   },
   {
+    "nvim-telescope/telescope.nvim",
+    dependencies = { "nvim-treesitter/nvim-treesitter" },
+    cmd = "Telescope",
+    opts = require "configs.telescope",
+  },
+  {
     "williamboman/mason.nvim",
     lazy = false,
     config = function()
