@@ -9,5 +9,5 @@ vpn="$(nmcli -t -f name,type connection show --order name --active 2>/dev/null |
 if [ -n "$vpn" ]; then
   echo "%{F$COLOR_CONNECTED}%{F-}"
 else
-  echo "%{F$COLOR_DISCONNECTED}  No VPN%{F-}" && nmcli con up id VPNNP-cbe213
+  echo "%{F$COLOR_DISCONNECTED}  No VPN%{F-}"
 fi
