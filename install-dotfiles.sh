@@ -201,27 +201,104 @@ clone_dotfiles() {
 }
 
 # ── stow all packages ─────────────────────────────────────────────────────────
+#
+#  Pre-flight conflict resolution strategy:
+#   1. Simulate stow (--no) to collect every conflict path
+#   2. For each conflicting target:
+#        a. Absolute symlink pointing elsewhere  → remove it
+#        b. Relative symlink owned by a different stow dir → remove it
+#        c. Plain file / directory not owned by stow       → back it up (.bak)
+#   3. Run the real stow now that the path is clear
+#
 stow_dotfiles() {
     header "Symlinking configs with stow"
     cd "$DOTFILES_DIR"
 
-    # Directories that stow should skip (not config packages)
     SKIP=(".git" "." "..")
+    BACKUP_DIR="$HOME/.dotfiles-conflicts-backup-$(date +%Y%m%d_%H%M%S)"
+
+    resolve_conflicts() {
+        local pkg="$1"
+
+        # Dry-run: capture stderr which contains conflict/warning lines
+        local sim_out
+        sim_out=$(stow --simulate --restow --target="$HOME" "$pkg" 2>&1 || true)
+
+        # Pull out every conflicting target path (relative to $HOME)
+        # stow prints lines like:
+        #   * existing target is not a link: .bashrc
+        #   * existing target is neither a link nor a directory: .bashrc
+        #   * existing target is not owned by stow: .config/nvim
+        local conflicts
+        conflicts=$(echo "$sim_out" | grep -oP '(?<=: )[^\s].*' | grep -v '^$' || true)
+
+        if [[ -z "$conflicts" ]]; then
+            return 0   # nothing to fix
+        fi
+
+        mkdir -p "$BACKUP_DIR"
+        warn "Resolving conflicts for package '$pkg':"
+
+        while IFS= read -r rel; do
+            local target="$HOME/$rel"
+
+            [[ -z "$rel" ]] && continue
+
+            if [[ -L "$target" ]]; then
+                # It's a symlink — absolute or owned by a foreign stow dir
+                local dest
+                dest=$(readlink "$target")
+                warn "  Removing conflicting symlink: $target -> $dest"
+                rm -f "$target"
+
+            elif [[ -f "$target" ]]; then
+                # Plain file — back it up
+                local bak="$BACKUP_DIR/$rel"
+                mkdir -p "$(dirname "$bak")"
+                warn "  Backing up plain file: $target → $bak"
+                mv "$target" "$bak"
+
+            elif [[ -d "$target" ]]; then
+                # Directory not owned by stow — back it up
+                local bak="$BACKUP_DIR/$rel"
+                mkdir -p "$(dirname "$bak")"
+                warn "  Backing up directory: $target → $bak"
+                mv "$target" "$bak"
+            fi
+        done <<< "$conflicts"
+    }
 
     for d in */; do
         pkg="${d%/}"
-        # skip non-directory entries or meta files
         [[ " ${SKIP[*]} " =~ " ${pkg} " ]] && continue
         [[ ! -d "$pkg" ]] && continue
 
         info "Stowing: $pkg"
-        # --adopt: if target already exists, adopt it (moves file into dotfiles)
-        # then restore with git to use the repo version
-        stow --restow --target="$HOME" "$pkg" 2>/dev/null \
-            || { warn "stow $pkg failed — trying with --adopt"; \
-                 stow --adopt --restow --target="$HOME" "$pkg" && \
-                 git checkout -- "$pkg" 2>/dev/null || true; }
+
+        # First attempt — clean run
+        if stow --restow --target="$HOME" "$pkg" 2>/dev/null; then
+            continue
+        fi
+
+        # Second attempt — resolve conflicts then retry
+        warn "  Conflict detected for '$pkg' — auto-resolving..."
+        resolve_conflicts "$pkg"
+
+        if stow --restow --target="$HOME" "$pkg" 2>/dev/null; then
+            success "  '$pkg' stowed after conflict resolution"
+        else
+            # Last resort: --adopt (pull existing files into dotfiles dir)
+            # then reset to repo version so our configs win
+            warn "  Falling back to --adopt for '$pkg'..."
+            stow --adopt --restow --target="$HOME" "$pkg" 2>/dev/null || true
+            git -C "$DOTFILES_DIR" checkout -- "$pkg" 2>/dev/null || true
+            success "  '$pkg' stowed via adopt+reset"
+        fi
     done
+
+    if [[ -d "$BACKUP_DIR" ]]; then
+        info "Conflicting originals backed up to: $BACKUP_DIR"
+    fi
 
     success "All packages stowed"
 }
